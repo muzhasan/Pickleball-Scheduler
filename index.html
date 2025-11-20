@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pickleball Scheduler</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="./images/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="./images/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="./images/favicon-16x16.png">
+    <link rel="manifest" href="./images/site.webmanifest">
+    <link rel="stylesheet" type="text/css" href="./style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <img src="./images/pickleball.png">
+            <h2>Pickleball Scheduler</h2>
+        </header>
+        <div class="parent-grid">
+            <div class="child-grid">
+                <div class="form-grid">
+                    <label for="num_players">Number of players:</label>
+                    <input type="number" id="num_players" value="18" min="4">
+                    
+                    <label for="num_courts">Number of courts:</label>
+                    <input type="number" id="num_courts" value="4" min="1">
+                    
+                    <label for="num_rounds">Number of rounds:</label>
+                    <input type="number" id="num_rounds" value="8" min="1">
+                </div>
+            </div>
+            <div class="child-grid">
+                <h3>Features</h3>
+                <ul>
+                    <li>Avoid pairing the same players or opponents.</li>
+                    <li>Balance and distribute sit-outs.</li>
+                    <li>Minimise playing against the same players.</li>
+                    <li>Higlight players with multiple sit-outs.</li>
+                    <li>Optionally add the player's names.</li>
+                </ul>
+            </div>
+        </div>
+        <div style="display:inline-block">
+            <button id="player_names_btn">Add Player Names</button>
+            <button id="generate_btn">Generate Schedule</button>
+            <button id="print_btn" style="display:none">Print Schedule</button>
+        </div>
+        <div id="status"></div>
+        
+        <!-- Player names modal -->
+        <div id="name-modal" style="display:none;" aria-hidden="true">
+            <div class="modal-overlay"></div>
+            <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="name-modal-title">
+                <h3 id="name-modal-title">Enter player names</h3>
+                <p id="name-modal-sub">Leave blank to use the numbers.</br>Copy or paste line separated names from the clipboard.</p>
+                <div id="name-fields" style="display:grid; gap:8px; max-height:40vh; overflow:auto;"></div>
+                <div style="margin-top:12px; text-align:right;">
+                    <button id="name-copy-btn" style="margin-right:8px">Copy</button>
+                    <button id="name-paste-btn" style="margin-right:8px">Paste</button>
+                    <button id="name-save-btn" style="margin-right:8px">Apply</button>
+                    <button id="name-cancel-btn">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="schedule-container"></div>
+    </div>
+    <!-- Print-only container -->
+    <div id="print-area" style="display:none"></div>
+    <script type="text/javascript" src="./scripts.js"></script>
+</body>
+</html>
