@@ -570,12 +570,14 @@ function displaySchedule(schedule) {
 
     const max_courts = Math.max(...schedule.map(rnd => rnd.matches.length));
     let html = [];
+    html.push("<div class='schedule-wrapper'>");
+    html.push("<button id='toggle-court-edit-btn' class='court-edit-btn'>Edit Court Numbers</button>");
     html.push("<table>");
 
     // Header row
     let header = ["Round"];
     for (let i = 0; i < max_courts; i++) {
-        header.push(`Court ${i+1}`);
+        header.push(`<span class='court-header' data-court='${i+1}'>Court ${i+1}</span>`);
     }
     header.push("Sitting Out");
     html.push("<tr>" + header.map(h => `<th>${h}</th>`).join("") + "</tr>");
@@ -641,26 +643,110 @@ function displaySchedule(schedule) {
     }
 
     html.push("</table>");
+    html.push("</div>");
     container.innerHTML = html.join("\n");
+    
+    // Add event listeners for court number editing
+    const toggleBtn = document.getElementById('toggle-court-edit-btn');
+    toggleBtn.addEventListener('click', () => {
+        toggleCourtEdit(toggleBtn, max_courts);
+    });
     
     // Show print button when we have a schedule
     const printBtn = document.getElementById('print_btn');
     printBtn.style.display = 'inline-block';
     
-    // Create a clean version for printing
-    const printArea = document.getElementById('print-area');
-    const date = new Date().toLocaleDateString();
-    const headerText = `
-        <div style="text-align:center; margin-bottom: 20px;">
-            <h1 style="margin-bottom: 10px">Pickleball Schedule - ${date}</h2>
-        </div>
-    `;
+    // Update print area function
+    const updatePrintArea = () => {
+        const printArea = document.getElementById('print-area');
+        const date = new Date().toLocaleDateString();
+        const headerText = `
+            <div style="text-align:center; margin-bottom: 20px;">
+                <h1 style="margin-bottom: 10px">Pickleball Schedule - ${date}</h2>
+            </div>
+        `;
+        
+        // Clone the table to preserve all classes and formatting
+        const tableClone = container.querySelector('table').cloneNode(true);
+        
+        // Convert any input fields to text (in case we're in edit mode)
+        const inputs = tableClone.querySelectorAll('input.court-number-input');
+        inputs.forEach((input, idx) => {
+            const span = document.createElement('span');
+            span.className = 'court-header';
+            span.textContent = `Court ${input.value || (idx + 1)}`;
+            input.replaceWith(span);
+        });
+        
+        printArea.innerHTML = ''; // Clear previous content
+        printArea.innerHTML = headerText;
+        printArea.appendChild(tableClone);
+    };
     
-    // Clone the table to preserve all classes and formatting
-    const tableClone = container.querySelector('table').cloneNode(true);
-    printArea.innerHTML = ''; // Clear previous content
-    printArea.innerHTML = headerText;
-    printArea.appendChild(tableClone);
+    // Create initial print area
+    updatePrintArea();
+    
+    // Update print area when toggle button is clicked
+    const originalToggleListener = toggleBtn.onclick;
+    toggleBtn.addEventListener('click', () => {
+        // Update print area after a short delay to ensure DOM is updated
+        setTimeout(updatePrintArea, 50);
+    });
+}
+
+function toggleCourtEdit(button, max_courts) {
+    const table = document.querySelector('.schedule-wrapper table');
+    const headers = table.querySelectorAll('th .court-header');
+    const isEditing = button.classList.contains('editing');
+    
+    if (!isEditing) {
+        // Enter edit mode
+        button.classList.add('editing');
+        button.textContent = 'Done Editing';
+        
+        headers.forEach(header => {
+            const currentCourt = header.getAttribute('data-court');
+            const currentText = header.textContent;
+            
+            const input = document.createElement('input');
+            input.type = 'number';
+            input.className = 'court-number-input';
+            input.value = currentCourt;
+            input.min = '1';
+            
+            header.replaceWith(input);
+        });
+    } else {
+        // Exit edit mode
+        button.classList.remove('editing');
+        button.textContent = 'Edit Court Numbers';
+        
+        const inputs = table.querySelectorAll('th input.court-number-input');
+        inputs.forEach((input, idx) => {
+            const courtNum = input.value || (idx + 1);
+            
+            const span = document.createElement('span');
+            span.className = 'court-header';
+            span.setAttribute('data-court', courtNum);
+            span.textContent = `Court ${courtNum}`;
+            
+            input.replaceWith(span);
+        });
+        
+        // Update print area after exiting edit mode
+        const container = document.getElementById('schedule-container');
+        const printArea = document.getElementById('print-area');
+        const date = new Date().toLocaleDateString();
+        const headerText = `
+            <div style="text-align:center; margin-bottom: 20px;">
+                <h1 style="margin-bottom: 10px">Pickleball Schedule - ${date}</h2>
+            </div>
+        `;
+        
+        const tableClone = container.querySelector('table').cloneNode(true);
+        printArea.innerHTML = headerText;
+        printArea.appendChild(tableClone);
+    }
 }
 
 // Print button handler
