@@ -174,81 +174,87 @@ function* combinations(array, k) {
 
 /**
  * Compute score: lower is better.
+ * 
+ * Scoring criteria:
+ * 1. HIGHEST PRIORITY: Penalize repeat partnerships (same teammates)
+ * 2. Penalize repeat interactions (different teammates/opponents combinations)
+ * 3. Penalize consecutive sit-outs for the same player
+ * 4. Penalize uneven sit-out distribution
+ * 5. Bonus: Ensure all players have played with/against each other at least once
  */
 function schedule_score(schedule, num_players) {
-    let partners = {}; 
-    let sit_counts = {}; 
-    let opponents = {}; // who each player has faced
-    let repeat_penalty = 0;
+    let partnerships = {}; // key: "p1,p2" (sorted), count of times they've been teammates
+    let interactions = {}; // key: "p1,p2" (sorted), count of times they've been in same match
+    let sit_counts = {};
+    let all_opponents = {}; // who each player has played with or against
+    let consecutive_sitouts = 0;
+    let repeat_partnership_penalty = 0;
+    let repeat_interaction_penalty = 0;
+    let last_sitting_out = {};
 
     for (let p = 1; p <= num_players; p++) {
-        partners[p] = new Set();
-        opponents[p] = new Set();
+        all_opponents[p] = new Set();
         sit_counts[p] = 0;
+        last_sitting_out[p] = -999; // track when they last sat out
     }
 
-    // To detect close succession repeats
-    let last_round_opponents = {};
-
+    // Process each round
     for (let r = 0; r < schedule.length; r++) {
         const rnd = schedule[r];
-        const current_round_opponents = {};
 
         for (const [t1, t2] of rnd.matches) {
-            // t1 and t2 are arrays [a,b] and [c,d]
-            const [a, b] = t1;
-            const [c, d] = t2;
+            const [a1, a2] = t1;
+            const [b1, b2] = t2;
 
-            // partner repeat penalty (teammates)
-            for (const [x, y] of [t1, t2]) {
-                if (partners[x].has(y)) {
-                    repeat_penalty += 100; // HIGHEST PRIORITY: strict penalty for repeat partners
+            // Track partnerships (teammates) - HIGHEST PRIORITY
+            const partnership_pairs = [[a1, a2], [b1, b2]];
+            for (const [p1, p2] of partnership_pairs) {
+                const key = [p1, p2].sort().join(',');
+                partnerships[key] = (partnerships[key] || 0) + 1;
+                if (partnerships[key] > 1) {
+                    repeat_partnership_penalty += 5000; // EXTREMELY HIGH PENALTY for repeat partnerships
                 }
-                partners[x].add(y);
-                partners[y].add(x);
             }
 
-            // opponents repeats and close succession
-            const pairs = [[a, c], [a, d], [b, c], [b, d]];
-            for (const [p, opp] of pairs) {
-                if (opponents[p].has(opp)) {
-                    repeat_penalty += 15; // stricter: penalty for repeating opponent
+            // Track all interactions in this match (all pairs that are in the same match together)
+            const all_pairs_in_match = [
+                [a1, a2], // teammates
+                [b1, b2], // teammates
+                [a1, b1], // opponents
+                [a1, b2], // opponents
+                [a2, b1], // opponents
+                [a2, b2]  // opponents
+            ];
+
+            for (const [p1, p2] of all_pairs_in_match) {
+                const key = [p1, p2].sort().join(',');
+                interactions[key] = (interactions[key] || 0) + 1;
+                
+                // Apply exponential penalty for multiple interactions (but less than partnerships)
+
+                // 1st interaction: 0, 2nd: 200, 3rd: 400, 4th: 800, etc.
+                if (interactions[key] > 1) {
+                    repeat_interaction_penalty += 200 * (interactions[key] - 1);
                 }
-                if (last_round_opponents[p] && last_round_opponents[p].has(opp)) {
-                    repeat_penalty += 50; // very strict: heavy penalty for facing same opponent in consecutive rounds
-                }
-                // record current round opponents
-                current_round_opponents[p] = current_round_opponents[p] || new Set();
-                current_round_opponents[p].add(opp);
             }
 
-            // also record opponents for the other side
-            const pairs2 = [[c, a], [c, b], [d, a], [d, b]];
-            for (const [p, opp] of pairs2) {
-                current_round_opponents[p] = current_round_opponents[p] || new Set();
-                current_round_opponents[p].add(opp);
-            }
+            // Track who each player has played with or against
+            all_opponents[a1].add(a2); all_opponents[a1].add(b1); all_opponents[a1].add(b2);
+            all_opponents[a2].add(a1); all_opponents[a2].add(b1); all_opponents[a2].add(b2);
+            all_opponents[b1].add(a1); all_opponents[b1].add(a2); all_opponents[b2].add(a1); all_opponents[b2].add(a2);
         }
 
-        // update global opponents and sit counts
-        for (const pKey in current_round_opponents) {
-            const p = Number(pKey);
-            for (const opp of current_round_opponents[pKey]) {
-                opponents[p].add(opp);
-            }
-        }
-
+        // Check for consecutive sit-outs
         for (const s of rnd.sitting_out) {
-            sit_counts[s] = (sit_counts[s] || 0) + 1;
+            sit_counts[s]++;
+            if (r > 0 && schedule[r - 1].sitting_out.includes(s)) {
+                consecutive_sitouts += 50; // Penalize consecutive sit-outs
+            }
+            last_sitting_out[s] = r;
         }
-
-        // set last_round_opponents for next iteration
-        last_round_opponents = current_round_opponents;
     }
 
-    /**
-     * Fairness penalty for uneven sit-outs.
-     */
+    // Penalty for uneven sit-out distribution (fairness)
     const total_sits = Object.values(sit_counts).reduce((a, b) => a + b, 0);
     const avg_sit = total_sits / num_players;
     let fairness_penalty = 0;
@@ -258,33 +264,37 @@ function schedule_score(schedule, num_players) {
         fairness_penalty += (sits - avg_sit) ** 2;
     }
 
-    /**
-     * Fairness penalty for uneven opponent distribution.
-     * Count how many times each player-pair has met and penalize uneven distribution.
-     */
-    let pair_meetings = {}; // key: "p1,p2" (sorted), value: count
+    // Bonus: Count players who haven't played with/against everyone yet
+    let incomplete_pairings = 0;
     for (let p = 1; p <= num_players; p++) {
-        for (const opp of opponents[p]) {
-            const key = [p, opp].sort().join(',');
-            pair_meetings[key] = (pair_meetings[key] || 0) + 1;
+        const potential_opponents = num_players - 1; // All other players
+        const missed = potential_opponents - all_opponents[p].size;
+        incomplete_pairings += missed;
+    }
+
+    // Penalty: If someone has sat out but not everyone has at least once
+    let sitout_fairness = 0;
+    const num_who_sat = Object.values(sit_counts).filter(x => x > 0).length;
+    if (num_who_sat < num_players && total_sits > 0) {
+        // Penalize if some have sat and others haven't
+        for (let p = 1; p <= num_players; p++) {
+            if (sit_counts[p] === 0 && total_sits > 0) {
+                sitout_fairness += 100; // Players should sit at least once
+            }
         }
     }
 
-    // Calculate average meetings per pair (should be low, ideally 0 or 1)
-    const pair_count = Object.keys(pair_meetings).length;
-    const total_meetings = Object.values(pair_meetings).reduce((a, b) => a + b, 0);
-    const avg_meetings = pair_count > 0 ? total_meetings / pair_count : 0;
-
-    let opponent_fairness = 0;
-    for (const count of Object.values(pair_meetings)) {
-        opponent_fairness += (count - avg_meetings) ** 2;
-    }
-
-    return repeat_penalty + 0.5 * fairness_penalty + 2.0 * opponent_fairness;
+    return repeat_interaction_penalty + consecutive_sitouts + 0.5 * fairness_penalty + 0.1 * incomplete_pairings + sitout_fairness;
 }
 
 /**
  * Generate the schedule using randomised search.
+ * 
+ * Rules:
+ * 1. No repeat partnerships (same teammates) - strict requirement
+ * 2. Can play against same player multiple times at random - allowed
+ * 3. Every player should sit out at least once (if there are sit-outs)
+ * 4. Avoid consecutive sit-outs for same player
  */
 function generate_schedule(num_players, num_courts, num_rounds, max_attempts = 2000) {
     let players = Array.from({length: num_players}, (_, i) => i + 1);
@@ -297,17 +307,13 @@ function generate_schedule(num_players, num_courts, num_rounds, max_attempts = 2
 
     for (let attempt = 0; attempt < max_attempts; attempt++) {
         shuffle(players); // Shuffle master list for this attempt
-        let partners = {};
+        let partnerships = {}; // Track partnerships: key "p1,p2" (sorted), NEVER allow repeats
+        let interactions = {}; // Track all interactions: key "p1,p2" (sorted), value: count
         let sit_counts = {};
         for (const p of players) {
-            partners[p] = new Set();
             sit_counts[p] = 0;
         }
-        // Initialize opponents tracking for this attempt (who each player has faced)
-        this.opponents = {};
-        for (const p of players) {
-            this.opponents[p] = new Set();
-        }
+        
         let schedule = [];
         let valid = true;
 
@@ -383,80 +389,45 @@ function generate_schedule(num_players, num_courts, num_rounds, max_attempts = 2
                 }
                 
                 let found = false;
-                // Build an opponents map to avoid repeating opponents and recent opponents
-                // opponents[player] = Set of players they've faced
-                if (!('opponents' in this)) this.opponents = {};
-                // initialize opponents map for this attempt
-                for (const p of players) {
-                    if (!this.opponents[p]) this.opponents[p] = new Set();
-                }
-
-                // helper: get last-round opponents for close-succession avoidance
-                const last_round_opponents = (rnd > 0 && schedule[rnd - 1]) ? (() => {
-                    const m = schedule[rnd - 1].matches || [];
-                    const map = {};
-                    for (const match of m) {
-                        const [t1, t2] = match;
-                        const [a, b] = t1; const [c, d] = t2;
-                        // a faced c,d
-                        map[a] = map[a] || new Set(); map[a].add(c); map[a].add(d);
-                        map[b] = map[b] || new Set(); map[b].add(c); map[b].add(d);
-                        map[c] = map[c] || new Set(); map[c].add(a); map[c].add(b);
-                        map[d] = map[d] || new Set(); map[d].add(a); map[d].add(b);
-                    }
-                    return map;
-                })() : {};
 
                 for (const group of combinations(available, 4)) {
                     const [a, b, c, d] = group;
                     const pairings = [ [[a, b], [c, d]], [[a, c], [b, d]], [[a, d], [b, c]] ];
 
-                    // Evaluate pairings and choose the best (least opponent-repeat penalties)
+                    // Evaluate pairings and choose the best
                     let bestPair = null;
                     let bestScore = Infinity;
 
                     for (const [t1, t2] of pairings) {
-                        // don't allow repeat partners (teammates) as before
-                        if (partners[t1[0]].has(t1[1]) || partners[t2[0]].has(t2[1])) {
-                            continue;
-                        }
-
-                        // compute penalty: opponent repeats and recent repeats are penalized
-                        let penalty = 0;
-                        const team1 = t1; const team2 = t2;
+                        // STRICT: Do not allow repeat partnerships (same teammates)
+                        // This is the HIGHEST priority
+                        const key1 = [t1[0], t1[1]].sort().join(',');
+                        const key2 = [t2[0], t2[1]].sort().join(',');
                         
-                        // Check for potential repeat partnerships (both directions)
-                        let hasPartnershipRisk = false;
-                        for (const p1 of team1) {
-                            for (const p2 of team1) {
-                                if (p1 < p2) {
-                                    // potential partnership within team1 - check if they've played together before
-                                    // (Note: we already blocked via partners set, but we want to penalize near-misses)
-                                }
-                            }
+                        if ((partnerships[key1] && partnerships[key1] > 0) || (partnerships[key2] && partnerships[key2] > 0)) {
+                            continue; // Skip this pairing entirely - partnerships are forbidden to repeat
                         }
-                        for (const p1 of team2) {
-                            for (const p2 of team2) {
-                                if (p1 < p2) {
-                                    // potential partnership within team2
-                                }
+
+                        // Compute penalty for this pairing (only for non-partnership interactions)
+                        let penalty = 0;
+                        
+                        // Penalize if players in same match have played together before (except partnerships)
+                        const opponent_pairs_in_match = [
+                            [t1[0], t2[0]], // opponents
+                            [t1[0], t2[1]], // opponents
+                            [t1[1], t2[0]], // opponents
+                            [t1[1], t2[1]]  // opponents
+                        ];
+                        
+                        for (const [p1, p2] of opponent_pairs_in_match) {
+                            const key = [p1, p2].sort().join(',');
+                            if (interactions[key] && interactions[key] > 1) {
+                                // Exponential penalty for repeat interactions
+                                penalty += 100 * (interactions[key] - 1);
                             }
                         }
 
-                        for (const p1 of team1) {
-                            for (const p2 of team2) {
-                                if (this.opponents[p1] && this.opponents[p1].has(p2)) penalty += 15; // stricter: previous-opponent repeat
-                                if (last_round_opponents[p1] && last_round_opponents[p1].has(p2)) penalty += 50; // very strict: close succession heavily penalize
-                            }
-                        }
-                        for (const p1 of team2) {
-                            for (const p2 of team1) {
-                                if (this.opponents[p1] && this.opponents[p1].has(p2)) penalty += 3;
-                                if (last_round_opponents[p1] && last_round_opponents[p1].has(p2)) penalty += 10;
-                            }
-                        }
-
-                        // small random tie-breaker to vary solutions
+                        // Small random tie-breaker to vary solutions
                         penalty += Math.random() * 0.1;
 
                         if (penalty < bestScore) {
@@ -466,19 +437,34 @@ function generate_schedule(num_players, num_courts, num_rounds, max_attempts = 2
                     }
 
                     if (bestPair) {
-                        // accept best pairing for this group
+                        // Accept best pairing for this group
                         const [t1, t2] = bestPair;
                         round_matches.push([t1, t2]);
-                        for (const [x, y] of [t1, t2]) {
-                            partners[x].add(y);
-                            partners[y].add(x);
+
+                        // Track partnerships (HIGH PRIORITY - strictly no repeats)
+                        const partnership_pairs = [
+                            [t1[0], t1[1]],
+                            [t2[0], t2[1]]
+                        ];
+                        for (const [p1, p2] of partnership_pairs) {
+                            const key = [p1, p2].sort().join(',');
+                            partnerships[key] = (partnerships[key] || 0) + 1;
                         }
-                        // update opponents map
-                        const [a1, a2] = t1; const [b1, b2] = t2;
-                        this.opponents[a1].add(b1); this.opponents[a1].add(b2);
-                        this.opponents[a2].add(b1); this.opponents[a2].add(b2);
-                        this.opponents[b1].add(a1); this.opponents[b1].add(a2);
-                        this.opponents[b2].add(a1); this.opponents[b2].add(a2);
+
+                        // Track all interactions (for optimization purposes)
+                        const all_pairs_in_match = [
+                            [t1[0], t1[1]], // teammates
+                            [t2[0], t2[1]], // teammates
+                            [t1[0], t2[0]], // opponents
+                            [t1[0], t2[1]], // opponents
+                            [t1[1], t2[0]], // opponents
+                            [t1[1], t2[1]]  // opponents
+                        ];
+                        
+                        for (const [p1, p2] of all_pairs_in_match) {
+                            const key = [p1, p2].sort().join(',');
+                            interactions[key] = (interactions[key] || 0) + 1;
+                        }
 
                         available = available.filter(p => !group.includes(p));
                         found = true;
@@ -494,9 +480,27 @@ function generate_schedule(num_players, num_courts, num_rounds, max_attempts = 2
                     const t1 = [a, b];
                     const t2 = [c, d];
                     round_matches.push([t1, t2]);
-                    for (const [x, y] of [t1, t2]) {
-                        partners[x].add(y);
-                        partners[y].add(x);
+                    
+                    // Track partnerships
+                    const partnership_pairs = [[a, b], [c, d]];
+                    for (const [p1, p2] of partnership_pairs) {
+                        const key = [p1, p2].sort().join(',');
+                        partnerships[key] = (partnerships[key] || 0) + 1;
+                    }
+
+                    // Track all interactions
+                    const all_pairs_in_match = [
+                        [a, b], // teammates
+                        [c, d], // teammates
+                        [a, c], // opponents
+                        [a, d], // opponents
+                        [b, c], // opponents
+                        [b, d]  // opponents
+                    ];
+                    
+                    for (const [p1, p2] of all_pairs_in_match) {
+                        const key = [p1, p2].sort().join(',');
+                        interactions[key] = (interactions[key] || 0) + 1;
                     }
                 }
             } // end matches_per_round loop
@@ -507,18 +511,43 @@ function generate_schedule(num_players, num_courts, num_rounds, max_attempts = 2
                 "sitting_out": sitting_out
             });
 
-            // Validate sit distribution after each round
+            // Validate sit distribution: ensure no player sits more than once more than any other
             const max_sits = Math.max(...Object.values(sit_counts));
             const min_sits = Math.min(...Object.values(sit_counts));
             if (max_sits > min_sits + 1) {
-                // Don't allow any player to sit more than once until everyone has sat
-                // or more than twice until everyone has sat twice, etc.
                 valid = false;
                 break;
             }
         } // end num_rounds loop
 
         if (!valid) continue; // Skip scoring, try next attempt
+
+        // CRITICAL VALIDATION: Check for any repeat partnerships in the generated schedule
+        let has_repeat_partnership = false;
+        let partnership_check = {};
+        for (let r = 0; r < schedule.length; r++) {
+            const rnd = schedule[r];
+            for (const [t1, t2] of rnd.matches) {
+                const [a1, a2] = t1;
+                const [b1, b2] = t2;
+                
+                const key1 = [a1, a2].sort().join(',');
+                const key2 = [b1, b2].sort().join(',');
+                
+                if (partnership_check[key1] || partnership_check[key2]) {
+                    has_repeat_partnership = true;
+                    break;
+                }
+                partnership_check[key1] = true;
+                partnership_check[key2] = true;
+            }
+            if (has_repeat_partnership) break;
+        }
+        
+        // If we found repeat partnerships, skip this schedule attempt
+        if (has_repeat_partnership) {
+            continue;
+        }
 
         const score = schedule_score(schedule, num_players);
         if (score < best_score) {
@@ -617,27 +646,17 @@ function displaySchedule(schedule) {
             row_html.push("<td>—</td>");
         }
         
-        // Sitting out - check for repeats
+        // Sitting out - append count in brackets if sitting out more than once
         const roundNum = rnd.round;
         const sitters = rnd.sitting_out;
-                const sitting = sitters.length > 0 ? sitters.map(getName).join(", ") : "";
+        const sitting = sitters.length > 0 ? sitters.map(p => {
+            const sits = sitouts.get(p);
+            const sitCount = sits ? sits.length : 0;
+            const name = getName(p);
+            return sitCount > 1 ? `${name} [${sitCount}]` : name;
+        }).join(", ") : "";
         
-        let hasRepeatSitter = false;
-        let repeatSitInfo = [];
-                sitters.forEach(p => {
-                    const sits = sitouts.get(p);
-                    if (sits && sits.length > 1) {
-                        hasRepeatSitter = true;
-                        repeatSitInfo.push(`${getName(p)}: rounds ${sits.join(', ')}`);
-                    }
-                });
-        
-        if (hasRepeatSitter) {
-            const tooltip = `Repeat sit-outs:\n${repeatSitInfo.join('\n')}`;
-            row_html.push(`<td class="repeat-sitout">${sitting}<span class="highlight-tooltip">${tooltip}</span></td>`);
-        } else {
-            row_html.push(`<td>${sitting}</td>`);
-        }
+        row_html.push(`<td>${sitting}</td>`);
         
         html.push("<tr>" + row_html.join("") + "</tr>");
     }

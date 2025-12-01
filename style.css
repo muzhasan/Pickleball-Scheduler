@@ -110,10 +110,6 @@ ul{
     background-color: #ffd7d7;  /* Light red for repeated partnerships */
     position: relative;
 }
-.repeat-sitout {
-    background-color: #ffe4b5;  /* Light orange for repeated sit-outs */
-    position: relative;
-}
 .highlight-tooltip {
     display: none;
     position: absolute;
@@ -128,8 +124,7 @@ ul{
     white-space: nowrap;
     z-index: 1000;
 }
-.repeat-partnership:hover .highlight-tooltip,
-.repeat-sitout:hover .highlight-tooltip {
+.repeat-partnership:hover .highlight-tooltip {
     display: block;
 }
 #status {
