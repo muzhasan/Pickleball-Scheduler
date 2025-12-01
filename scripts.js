@@ -185,6 +185,7 @@ function* combinations(array, k) {
 function schedule_score(schedule, num_players) {
     let partnerships = {}; // key: "p1,p2" (sorted), count of times they've been teammates
     let interactions = {}; // key: "p1,p2" (sorted), count of times they've been in same match
+    let interactionsRounds = {}; // key: "p1,p2" (sorted), array of round indices where they interacted
     let sit_counts = {};
     let all_opponents = {}; // who each player has played with or against
     let consecutive_sitouts = 0;
@@ -229,6 +230,8 @@ function schedule_score(schedule, num_players) {
             for (const [p1, p2] of all_pairs_in_match) {
                 const key = [p1, p2].sort().join(',');
                 interactions[key] = (interactions[key] || 0) + 1;
+                if (!interactionsRounds[key]) interactionsRounds[key] = [];
+                interactionsRounds[key].push(r);
                 
                 // Apply exponential penalty for multiple interactions (but less than partnerships)
 
@@ -284,7 +287,24 @@ function schedule_score(schedule, num_players) {
         }
     }
 
-    return repeat_interaction_penalty + consecutive_sitouts + 0.5 * fairness_penalty + 0.1 * incomplete_pairings + sitout_fairness;
+    // Additional penalty: penalize repeated interactions that are too close together
+    let distributionPenalty = 0;
+    for (const key in interactionsRounds) {
+        const rounds = interactionsRounds[key];
+        if (!rounds || rounds.length < 2) continue;
+        const occurrences = rounds.length;
+        // Prefer spacing occurrences evenly across rounds; at minimum avoid consecutive rounds
+        const preferredGap = Math.max(2, Math.floor(num_rounds / (occurrences + 1)));
+        for (let i = 1; i < rounds.length; i++) {
+            const gap = rounds[i] - rounds[i - 1];
+            if (gap < preferredGap) {
+                // Penalize smaller gaps heavily so repeats spread out
+                distributionPenalty += 2000 * (preferredGap - gap);
+            }
+        }
+    }
+
+    return repeat_interaction_penalty + distributionPenalty + consecutive_sitouts + 0.5 * fairness_penalty + 0.1 * incomplete_pairings + sitout_fairness;
 }
 
 /**
@@ -309,6 +329,7 @@ function generate_schedule(num_players, num_courts, num_rounds, max_attempts = 2
         shuffle(players); // Shuffle master list for this attempt
         let partnerships = {}; // Track partnerships: key "p1,p2" (sorted), NEVER allow repeats
         let interactions = {}; // Track all interactions: key "p1,p2" (sorted), value: count
+        let interactionsRounds = {}; // Track rounds for each interaction key -> array of round indices
         let sit_counts = {};
         for (const p of players) {
             sit_counts[p] = 0;
@@ -424,6 +445,17 @@ function generate_schedule(num_players, num_courts, num_rounds, max_attempts = 2
                         for (const [p1, p2] of opponent_pairs_in_match) {
                             const key = [p1, p2].sort().join(',');
                             if (interactions[key]) sumInteractions += interactions[key];
+                            // If this pair interacted recently, penalize close repeats
+                            if (interactionsRounds[key] && interactionsRounds[key].length > 0) {
+                                const lastRound = interactionsRounds[key][interactionsRounds[key].length - 1];
+                                const occ = interactions[key] || 0;
+                                const prefGap = Math.max(2, Math.floor(num_rounds / (occ + 1)));
+                                const gap = rnd - lastRound;
+                                if (gap < prefGap) {
+                                    // Heavily penalize candidate that would place interactions too close
+                                    penalty += 2000 * (prefGap - gap);
+                                }
+                            }
                         }
 
                         // Heavily penalize repeats but allow them if unavoidable
@@ -467,6 +499,8 @@ function generate_schedule(num_players, num_courts, num_rounds, max_attempts = 2
                         for (const [p1, p2] of all_pairs_in_match) {
                             const key = [p1, p2].sort().join(',');
                             interactions[key] = (interactions[key] || 0) + 1;
+                            if (!interactionsRounds[key]) interactionsRounds[key] = [];
+                            interactionsRounds[key].push(rnd);
                         }
 
                         available = available.filter(p => !group.includes(p));
@@ -504,6 +538,8 @@ function generate_schedule(num_players, num_courts, num_rounds, max_attempts = 2
                     for (const [p1, p2] of all_pairs_in_match) {
                         const key = [p1, p2].sort().join(',');
                         interactions[key] = (interactions[key] || 0) + 1;
+                        if (!interactionsRounds[key]) interactionsRounds[key] = [];
+                        interactionsRounds[key].push(rnd);
                     }
                 }
             } // end matches_per_round loop
@@ -552,9 +588,10 @@ function generate_schedule(num_players, num_courts, num_rounds, max_attempts = 2
             continue;
         }
 
-        const score = schedule_score(schedule, num_players);
+        let score = schedule_score(schedule, num_players);
         if (score < best_score) {
-            best_schedule = schedule;
+            // Keep a deep-ish copy for best schedule
+            best_schedule = JSON.parse(JSON.stringify(schedule));
             best_score = score;
         }
         
@@ -564,7 +601,81 @@ function generate_schedule(num_players, num_courts, num_rounds, max_attempts = 2
         }
     } // end max_attempts loop
 
+    // If we found a schedule, try to improve it via local swaps
+    if (best_schedule) {
+        best_schedule = improve_schedule_by_local_swaps(best_schedule, num_players, 3000);
+    }
+
     return best_schedule;
+}
+
+/**
+ * Detect whether a schedule contains any repeat partnerships.
+ * Returns true if any teammate pair appears more than once.
+ */
+function detect_repeat_partnership(schedule) {
+    const partnership_check = {};
+    for (let r = 0; r < schedule.length; r++) {
+        const rnd = schedule[r];
+        for (const [t1, t2] of rnd.matches) {
+            const key1 = [t1[0], t1[1]].sort().join(',');
+            const key2 = [t2[0], t2[1]].sort().join(',');
+            if (partnership_check[key1] || partnership_check[key2]) return true;
+            partnership_check[key1] = true;
+            partnership_check[key2] = true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Try local random match swaps across rounds to improve schedule score.
+ * Performs up to maxIter swap attempts and keeps any swap that strictly
+ * reduces the score while preserving the no-repeat-partnership constraint.
+ */
+function improve_schedule_by_local_swaps(schedule, num_players, maxIter = 2000) {
+    if (!schedule) return schedule;
+    let currentScore = schedule_score(schedule, num_players);
+    const rnd = (n) => Math.floor(Math.random() * n);
+
+    for (let it = 0; it < maxIter; it++) {
+        // Pick two distinct rounds that both have at least one match
+        const r1 = rnd(schedule.length);
+        let r2 = rnd(schedule.length - 1);
+        if (r2 >= r1) r2 += 1; // ensure r2 != r1
+
+        if (schedule[r1].matches.length === 0 || schedule[r2].matches.length === 0) continue;
+
+        const m1 = rnd(schedule[r1].matches.length);
+        const m2 = rnd(schedule[r2].matches.length);
+
+        // Swap matches
+        const temp = schedule[r1].matches[m1];
+        schedule[r1].matches[m1] = schedule[r2].matches[m2];
+        schedule[r2].matches[m2] = temp;
+
+        // If swap introduces repeat partnership, revert
+        if (detect_repeat_partnership(schedule)) {
+            // revert
+            const temp2 = schedule[r1].matches[m1];
+            schedule[r1].matches[m1] = schedule[r2].matches[m2];
+            schedule[r2].matches[m2] = temp2;
+            continue;
+        }
+
+        const newScore = schedule_score(schedule, num_players);
+        if (newScore < currentScore) {
+            currentScore = newScore;
+            // keep swap
+        } else {
+            // revert swap
+            const temp2 = schedule[r1].matches[m1];
+            schedule[r1].matches[m1] = schedule[r2].matches[m2];
+            schedule[r2].matches[m2] = temp2;
+        }
+    }
+
+    return schedule;
 }
 
 /**
