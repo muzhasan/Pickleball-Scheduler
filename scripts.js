@@ -232,9 +232,9 @@ function schedule_score(schedule, num_players) {
                 
                 // Apply exponential penalty for multiple interactions (but less than partnerships)
 
-                // 1st interaction: 0, 2nd: 200, 3rd: 400, 4th: 800, etc.
+                // 1st interaction: 0, 2nd: heavy penalty, 3rd: larger, etc.
                 if (interactions[key] > 1) {
-                    repeat_interaction_penalty += 200 * (interactions[key] - 1);
+                    repeat_interaction_penalty += 1000 * (interactions[key] - 1);
                 }
             }
 
@@ -419,13 +419,16 @@ function generate_schedule(num_players, num_courts, num_rounds, max_attempts = 2
                             [t1[1], t2[1]]  // opponents
                         ];
                         
+                        // Compute sum of prior interactions for opponent pairs (lower is better)
+                        let sumInteractions = 0;
                         for (const [p1, p2] of opponent_pairs_in_match) {
                             const key = [p1, p2].sort().join(',');
-                            if (interactions[key] && interactions[key] > 1) {
-                                // Exponential penalty for repeat interactions
-                                penalty += 100 * (interactions[key] - 1);
-                            }
+                            if (interactions[key]) sumInteractions += interactions[key];
                         }
+
+                        // Heavily penalize repeats but allow them if unavoidable
+                        // penalty scales with number of prior interactions
+                        penalty += 2000 * sumInteractions;
 
                         // Small random tie-breaker to vary solutions
                         penalty += Math.random() * 0.1;
