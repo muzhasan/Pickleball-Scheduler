@@ -7,6 +7,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // State for player names and last generated schedule
     let playerNames = [];
     let lastSchedule = null;
+    let courtNumbers = [];
 
     document.getElementById('generate_btn').addEventListener('click', () => {
         const num_players = parseInt(document.getElementById('num_players').value);
@@ -708,7 +709,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // Header row
         let header = ["Round"];
         for (let i = 0; i < max_courts; i++) {
-            header.push(`<span class='court-header' data-court='${i + 1}'>Court ${i + 1}</span>`);
+            const courtNum = courtNumbers[i] || (i + 1);
+            header.push(`<span class='court-header' data-court='${courtNum}'>Court ${courtNum}</span>`);
         }
         header.push("Sitting Out");
         html.push("<tr>" + header.map(h => `<th>${h}</th>`).join("") + "</tr>");
@@ -795,7 +797,8 @@ document.addEventListener('DOMContentLoaded', () => {
             inputs.forEach((input, idx) => {
                 const span = document.createElement('span');
                 span.className = 'court-header';
-                span.textContent = `Court ${input.value || (idx + 1)}`;
+                const courtNum = input.value || courtNumbers[idx] || (idx + 1);
+                span.textContent = `Court ${courtNum}`;
                 input.replaceWith(span);
             });
 
@@ -845,6 +848,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const inputs = table.querySelectorAll('th input.court-number-input');
             inputs.forEach((input, idx) => {
                 const courtNum = input.value || (idx + 1);
+                courtNumbers[idx] = courtNum;
 
                 const span = document.createElement('span');
                 span.className = 'court-header';
