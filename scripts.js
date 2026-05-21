@@ -178,44 +178,43 @@ document.addEventListener('DOMContentLoaded', () => {
             this.num_players = num_players;
             this.num_courts = num_courts;
 
-            // Tracking history
-            this.partnerships = new Map(); // "p1,p2" -> count
-            this.opponents = new Map();    // "p1,p2" -> count
-            this.interactions = new Map(); // "p1,p2" -> count (Partner OR Opponent)
-            this.court_counts = Array.from({ length: num_players + 1 }, () => Array(num_courts).fill(0)); // player -> [c1_count, c2_count...]
-            this.last_court = Array.from({ length: num_players + 1 }, () => -1); // player -> last court index
-            this.sit_counts = Array.from({ length: num_players + 1 }, () => 0);
+            // Tracking history (Optimized with typed arrays for speed)
+            const max_p = num_players + 1;
+            this.partnerships = Array.from({ length: max_p }, () => new Uint8Array(max_p));
+            this.opponents = Array.from({ length: max_p }, () => new Uint8Array(max_p));
+            this.interactions = Array.from({ length: max_p }, () => new Uint8Array(max_p));
+            
+            this.court_counts = Array.from({ length: max_p }, () => Array(num_courts).fill(0)); // player -> [c1_count, c2_count...]
+            this.last_court = Array.from({ length: max_p }, () => -1); // player -> last court index
+            this.sit_counts = Array.from({ length: max_p }, () => 0);
             this.match_history = []; // Array of rounds
         }
 
         getPartnershipCount(p1, p2) {
-            const key = p1 < p2 ? `${p1},${p2}` : `${p2},${p1}`;
-            return this.partnerships.get(key) || 0;
+            return this.partnerships[p1][p2];
         }
 
         recordPartnership(p1, p2) {
-            const key = p1 < p2 ? `${p1},${p2}` : `${p2},${p1}`;
-            this.partnerships.set(key, (this.partnerships.get(key) || 0) + 1);
+            this.partnerships[p1][p2]++;
+            this.partnerships[p2][p1]++;
         }
 
         getOpponentCount(p1, p2) {
-            const key = p1 < p2 ? `${p1},${p2}` : `${p2},${p1}`;
-            return this.opponents.get(key) || 0;
+            return this.opponents[p1][p2];
         }
 
         recordOpponent(p1, p2) {
-            const key = p1 < p2 ? `${p1},${p2}` : `${p2},${p1}`;
-            this.opponents.set(key, (this.opponents.get(key) || 0) + 1);
+            this.opponents[p1][p2]++;
+            this.opponents[p2][p1]++;
         }
 
         getInteractionCount(p1, p2) {
-            const key = p1 < p2 ? `${p1},${p2}` : `${p2},${p1}`;
-            return this.interactions.get(key) || 0;
+            return this.interactions[p1][p2];
         }
 
         recordInteraction(p1, p2) {
-            const key = p1 < p2 ? `${p1},${p2}` : `${p2},${p1}`;
-            this.interactions.set(key, (this.interactions.get(key) || 0) + 1);
+            this.interactions[p1][p2]++;
+            this.interactions[p2][p1]++;
         }
 
         recordCourt(player, court_idx) {
@@ -390,128 +389,155 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     /**
-     * Generate matches for a single round using a greedy approach with local optimization.
+     * Generate matches for a single round using a randomized approach with local optimization (hill climbing).
      */
     function generate_round_matches(active_players, tracker, num_matches) {
-        // We need to form 'num_matches' groups of 4.
-        // Constraints:
-        // 1. NO REPEAT PARTNERS (Hard constraint if possible)
-        // 2. MIX OPPONENTS (Soft constraint)
-        // 3. COURT BLOCKING (Hard constraint): A group cannot consist of players who collectively block all courts.
+        let best_round = null;
+        let best_round_score = Infinity;
+        const attempts = 40; // Generate 40 random rounds, optimize them, and pick the best
 
-        let best_grouping = null;
-        let best_score = Infinity; // Lower is better
+        // Helper to calculate the cost of a specific match pairing (t1 vs t2)
+        const getMatchCost = (t1, t2) => {
+            // 1. Partnership repeats (Scale: 10000, Quadratic)
+            const p1_cost = tracker.getPartnershipCount(t1[0], t1[1]);
+            const p2_cost = tracker.getPartnershipCount(t2[0], t2[1]);
+            const partner_cost = (p1_cost ** 2 * 10000) + (p2_cost ** 2 * 10000);
 
-        // We'll try a few randomized greedy attempts
-        // We'll try a few randomized greedy attempts
-        const attempts = 1000; // Increased attempts significantly for better mixing
+            // 2. Opponent repeats (Scale: 500, Quadratic)
+            let opponent_cost = 0;
+            opponent_cost += tracker.getOpponentCount(t1[0], t2[0]) ** 2 * 500;
+            opponent_cost += tracker.getOpponentCount(t1[0], t2[1]) ** 2 * 500;
+            opponent_cost += tracker.getOpponentCount(t1[1], t2[0]) ** 2 * 500;
+            opponent_cost += tracker.getOpponentCount(t1[1], t2[1]) ** 2 * 500;
+
+            // 3. Interaction Repeats (Scale: 10, Quadratic) - Lower weight to allow partner/opponent switching
+            let interaction_cost = 0;
+            const group_players = [t1[0], t1[1], t2[0], t2[1]];
+            for (let x = 0; x < 4; x++) {
+                for (let y = x + 1; y < 4; y++) {
+                    const count = tracker.getInteractionCount(group_players[x], group_players[y]);
+                    interaction_cost += (count ** 2 * 10);
+                }
+            }
+
+            // 4. Court Blocking Penalty (Hard constraint proxy)
+            const blocked_courts = new Set();
+            group_players.forEach(p => {
+                const lc = tracker.last_court[p];
+                if (lc !== -1) blocked_courts.add(lc);
+            });
+            let valid_court_exists = false;
+            for (let c = 0; c < tracker.num_courts; c++) {
+                if (!blocked_courts.has(c)) {
+                    valid_court_exists = true;
+                    break;
+                }
+            }
+            const court_penalty = valid_court_exists ? 0 : 50000;
+
+            return partner_cost + opponent_cost + interaction_cost + court_penalty;
+        };
+
+        // Helper to find the best pairing for a group of 4 players
+        const getBestPairing = (group) => {
+            const combinations = [
+                [[group[0], group[1]], [group[2], group[3]]],
+                [[group[0], group[2]], [group[1], group[3]]],
+                [[group[0], group[3]], [group[1], group[2]]]
+            ];
+            let best_combo = null;
+            let best_combo_cost = Infinity;
+            for (const combo of combinations) {
+                const cost = getMatchCost(combo[0], combo[1]);
+                if (cost < best_combo_cost) {
+                    best_combo_cost = cost;
+                    best_combo = combo;
+                }
+            }
+            return { combo: best_combo, cost: best_combo_cost };
+        };
 
         for (let i = 0; i < attempts; i++) {
             let current_players = [...active_players];
             shuffle(current_players);
-            let round_matches = [];
-            let possible = true;
-            let round_score = 0;
-
-            while (round_matches.length < num_matches) {
-                // Take 4 players
-                if (current_players.length < 4) {
-                    possible = false;
-                    break;
-                }
-
-                const group = current_players.slice(0, 4);
-
-                // CHECK: Does this group block all courts?
-                const blocked_courts = new Set();
-                group.forEach(p => {
-                    const lc = tracker.last_court[p];
-                    if (lc !== -1) blocked_courts.add(lc);
-                });
-
-                // We need at least one court that is NOT in blocked_courts.
-                // The available courts are 0..tracker.num_courts-1
-                // Actually 'tracker.num_courts' tracks total courts.
-                let valid_court_exists = false;
-                for (let c = 0; c < tracker.num_courts; c++) {
-                    if (!blocked_courts.has(c)) {
-                        valid_court_exists = true;
-                        break;
-                    }
-                }
-
-                if (!valid_court_exists) {
-                    // This group is invalid because they cannot play on any court without repeating.
-                    // Since this is a simple greedy approach, we just fail this attempt and try again.
-                    // (In a smarter version, we'd swap players, but random shuffle usually finds a way).
-                    possible = false;
-                    break;
-                }
-
-                current_players = current_players.slice(4);
-
-                // Find best pairings within these 4
-                // [p1,p2] vs [p3,p4]
-                // [p1,p3] vs [p2,p4]
-                // [p1,p4] vs [p2,p3]
-
-                const combinations = [
-                    [[group[0], group[1]], [group[2], group[3]]],
-                    [[group[0], group[2]], [group[1], group[3]]],
-                    [[group[0], group[3]], [group[1], group[2]]]
-                ];
-
-                let best_combo = null;
-                let best_combo_cost = Infinity;
-
-                for (const combo of combinations) {
-                    const [t1, t2] = combo;
-
-                    // COST CALCULATION
-                    // 1. Partnership repeats (Scale: 10000) - Avoid repeat partners at all costs
-                    const p1_cost = tracker.getPartnershipCount(t1[0], t1[1]);
-                    const p2_cost = tracker.getPartnershipCount(t2[0], t2[1]);
-                    const partner_cost = (p1_cost > 0 ? 10000 * p1_cost : 0) + (p2_cost > 0 ? 10000 * p2_cost : 0);
-
-                    // 2. Interaction Repeats (Scale: 100) - Avoid playing with/against same people
-                    const group_players = [t1[0], t1[1], t2[0], t2[1]];
-                    let interaction_cost = 0;
-                    for (let x = 0; x < 4; x++) {
-                        for (let y = x + 1; y < 4; y++) {
-                            // For every pair in this match (partner or opponent)
-                            const count = tracker.getInteractionCount(group_players[x], group_players[y]);
-                            interaction_cost += (count * 100);
-                        }
-                    }
-
-                    const total_cost = partner_cost + interaction_cost;
-
-                    if (total_cost < best_combo_cost) {
-                        best_combo_cost = total_cost;
-                        best_combo = combo;
-                    }
-                }
-
-                if (best_combo) {
-                    round_matches.push(best_combo);
-                    round_score += best_combo_cost;
+            
+            // Initial random groups
+            let groups = [];
+            for (let j = 0; j < num_matches; j++) {
+                if (current_players.length >= 4) {
+                    groups.push(current_players.splice(0, 4));
                 }
             }
 
-            if (possible) {
-                // If this attempt is better than global best (or we haven't found one yet)
-                // AND ideally it shouldn't have repeat partners (score < 1000)
-                if (!best_grouping || round_score < best_score) {
-                    best_score = round_score;
-                    best_grouping = round_matches;
-                }
+            if (groups.length < num_matches) continue; 
 
-                // If we found a perfect one, stop early
+            // Hill Climbing Optimizer: Try swapping players between groups to lower the total score
+            let improved = true;
+            let max_swaps = 20; 
+            let swap_count = 0;
+
+            while (improved && swap_count < max_swaps) {
+                improved = false;
+                for (let g1 = 0; g1 < num_matches; g1++) {
+                    for (let g2 = g1 + 1; g2 < num_matches; g2++) {
+                        let current_score = getBestPairing(groups[g1]).cost + getBestPairing(groups[g2]).cost;
+                        
+                        let best_swap = null;
+                        let best_swap_score = current_score;
+                        
+                        // Try all 16 possible swaps between g1 and g2
+                        for (let p1 = 0; p1 < 4; p1++) {
+                            for (let p2 = 0; p2 < 4; p2++) {
+                                let new_g1 = [...groups[g1]];
+                                let new_g2 = [...groups[g2]];
+                                
+                                let temp = new_g1[p1];
+                                new_g1[p1] = new_g2[p2];
+                                new_g2[p2] = temp;
+                                
+                                let new_score = getBestPairing(new_g1).cost + getBestPairing(new_g2).cost;
+                                
+                                // Only accept strict improvements
+                                if (new_score < best_swap_score) {
+                                    best_swap_score = new_score;
+                                    best_swap = { new_g1, new_g2 };
+                                }
+                            }
+                        }
+                        
+                        if (best_swap) {
+                            groups[g1] = best_swap.new_g1;
+                            groups[g2] = best_swap.new_g2;
+                            improved = true;
+                            swap_count++;
+                        }
+                    }
+                }
+            }
+            
+            // Build the final matches for this attempt
+            let round_matches = [];
+            let round_score = 0;
+            let invalid_court = false;
+
+            for (let g = 0; g < num_matches; g++) {
+                const res = getBestPairing(groups[g]);
+                if (res.cost >= 50000) invalid_court = true;
+                round_matches.push(res.combo);
+                round_score += res.cost;
+            }
+            
+            if (!invalid_court) {
+                if (round_score < best_round_score) {
+                    best_round_score = round_score;
+                    best_round = round_matches;
+                }
+                
                 if (round_score === 0) break;
             }
         }
 
-        return best_grouping;
+        return best_round;
     }
 
     /**
