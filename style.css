@@ -259,6 +259,10 @@ ul {
     .highlight-tooltip {
         display: none !important;
     }
+
+    .reorder-controls {
+        display: none !important;
+    }
 }
 
 /* Print button style */

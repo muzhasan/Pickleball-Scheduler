@@ -183,7 +183,7 @@ document.addEventListener('DOMContentLoaded', () => {
             this.partnerships = Array.from({ length: max_p }, () => new Uint8Array(max_p));
             this.opponents = Array.from({ length: max_p }, () => new Uint8Array(max_p));
             this.interactions = Array.from({ length: max_p }, () => new Uint8Array(max_p));
-            
+
             this.court_counts = Array.from({ length: max_p }, () => Array(num_courts).fill(0)); // player -> [c1_count, c2_count...]
             this.last_court = Array.from({ length: max_p }, () => -1); // player -> last court index
             this.sit_counts = Array.from({ length: max_p }, () => 0);
@@ -460,7 +460,7 @@ document.addEventListener('DOMContentLoaded', () => {
         for (let i = 0; i < attempts; i++) {
             let current_players = [...active_players];
             shuffle(current_players);
-            
+
             // Initial random groups
             let groups = [];
             for (let j = 0; j < num_matches; j++) {
@@ -469,11 +469,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
 
-            if (groups.length < num_matches) continue; 
+            if (groups.length < num_matches) continue;
 
             // Hill Climbing Optimizer: Try swapping players between groups to lower the total score
             let improved = true;
-            let max_swaps = 20; 
+            let max_swaps = 20;
             let swap_count = 0;
 
             while (improved && swap_count < max_swaps) {
@@ -481,22 +481,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 for (let g1 = 0; g1 < num_matches; g1++) {
                     for (let g2 = g1 + 1; g2 < num_matches; g2++) {
                         let current_score = getBestPairing(groups[g1]).cost + getBestPairing(groups[g2]).cost;
-                        
+
                         let best_swap = null;
                         let best_swap_score = current_score;
-                        
+
                         // Try all 16 possible swaps between g1 and g2
                         for (let p1 = 0; p1 < 4; p1++) {
                             for (let p2 = 0; p2 < 4; p2++) {
                                 let new_g1 = [...groups[g1]];
                                 let new_g2 = [...groups[g2]];
-                                
+
                                 let temp = new_g1[p1];
                                 new_g1[p1] = new_g2[p2];
                                 new_g2[p2] = temp;
-                                
+
                                 let new_score = getBestPairing(new_g1).cost + getBestPairing(new_g2).cost;
-                                
+
                                 // Only accept strict improvements
                                 if (new_score < best_swap_score) {
                                     best_swap_score = new_score;
@@ -504,7 +504,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 }
                             }
                         }
-                        
+
                         if (best_swap) {
                             groups[g1] = best_swap.new_g1;
                             groups[g2] = best_swap.new_g2;
@@ -514,7 +514,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 }
             }
-            
+
             // Build the final matches for this attempt
             let round_matches = [];
             let round_score = 0;
@@ -526,13 +526,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 round_matches.push(res.combo);
                 round_score += res.cost;
             }
-            
+
             if (!invalid_court) {
                 if (round_score < best_round_score) {
                     best_round_score = round_score;
                     best_round = round_matches;
                 }
-                
+
                 if (round_score === 0) break;
             }
         }
@@ -729,7 +729,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const max_courts = Math.max(...schedule.map(rnd => rnd.matches.length));
         let html = [];
         html.push("<div class='schedule-wrapper'>");
-        html.push("<button id='toggle-court-edit-btn' class='court-edit-btn'>Edit Court Numbers</button>");
+        html.push("<button id='toggle-court-edit-btn' class='court-edit-btn'>Edit Schedule</button>");
         html.push("<table>");
 
         // Header row
@@ -743,7 +743,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Table rows
         for (const rnd of schedule) {
-            let row_html = [`<td>${rnd.round}</td>`];
+            rnd.original_id = rnd.original_id || Math.random().toString(36).substring(2, 9);
+            let row_html = [`<td class="round-col"><span class="round-number">${rnd.round}</span><div class="reorder-controls" style="display:none; margin-top:4px; white-space:nowrap;"><button class="move-up" style="padding:2px 6px; font-size:12px; margin-right:4px; margin-top:0;" title="Move Round Up">▲</button><button class="move-down" style="padding:2px 6px; font-size:12px; margin-top:0;" title="Move Round Down">▼</button></div></td>`];
 
             // Matches
             for (const match of rnd.matches) {
@@ -788,7 +789,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             row_html.push(`<td>${sitting}</td>`);
 
-            html.push("<tr>" + row_html.join("") + "</tr>");
+            html.push(`<tr data-id="${rnd.original_id}">` + row_html.join("") + "</tr>");
         }
 
         html.push("</table>");
@@ -799,6 +800,45 @@ document.addEventListener('DOMContentLoaded', () => {
         const toggleBtn = document.getElementById('toggle-court-edit-btn');
         toggleBtn.addEventListener('click', () => {
             toggleCourtEdit(toggleBtn, max_courts);
+        });
+
+        function updateScheduleOrder() {
+            const table = document.querySelector('.schedule-wrapper table');
+            const rows = Array.from(table.querySelectorAll('tr[data-id]'));
+
+            let newSchedule = [];
+            rows.forEach((row, index) => {
+                const id = row.getAttribute('data-id');
+                const rnd = lastSchedule.find(r => r.original_id === id);
+                if (rnd) {
+                    rnd.round = index + 1;
+                    newSchedule.push(rnd);
+                }
+                const roundSpan = row.querySelector('.round-number');
+                if (roundSpan) roundSpan.textContent = index + 1;
+            });
+            lastSchedule = newSchedule;
+            updatePrintArea();
+        }
+
+        container.querySelectorAll('.move-up').forEach(btn => {
+            btn.addEventListener('click', function () {
+                const tr = this.closest('tr');
+                if (tr.previousElementSibling && tr.previousElementSibling.hasAttribute('data-id')) {
+                    tr.parentNode.insertBefore(tr, tr.previousElementSibling);
+                    updateScheduleOrder();
+                }
+            });
+        });
+
+        container.querySelectorAll('.move-down').forEach(btn => {
+            btn.addEventListener('click', function () {
+                const tr = this.closest('tr');
+                if (tr.nextElementSibling && tr.nextElementSibling.hasAttribute('data-id')) {
+                    tr.parentNode.insertBefore(tr.nextElementSibling, tr);
+                    updateScheduleOrder();
+                }
+            });
         });
 
         // Show print button when we have a schedule
@@ -866,10 +906,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 header.replaceWith(input);
             });
+
+            table.querySelectorAll('.reorder-controls').forEach(el => el.style.display = 'block');
         } else {
             // Exit edit mode
             button.classList.remove('editing');
-            button.textContent = 'Edit Court Numbers';
+            button.textContent = 'Edit Schedule';
 
             const inputs = table.querySelectorAll('th input.court-number-input');
             inputs.forEach((input, idx) => {
@@ -883,6 +925,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 input.replaceWith(span);
             });
+
+            table.querySelectorAll('.reorder-controls').forEach(el => el.style.display = 'none');
 
             // Update print area after exiting edit mode
             const container = document.getElementById('schedule-container');
