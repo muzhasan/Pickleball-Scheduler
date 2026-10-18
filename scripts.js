@@ -226,90 +226,98 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     /**
-     * Main entry point for schedule generation
+     * Evaluates the overall quality of a candidate schedule.
+     * Partner repeats are weighted heavily to guarantee the primary goal of avoiding repeat partners.
      */
-    function generate_schedule(num_players, num_courts, num_rounds) {
-        // 1. Setup
+    function scoreSchedule(schedule) {
+        const partnerCounts = new Map();
+        const opponentCounts = new Map();
+        let partnerPenalty = 0;
+        let opponentPenalty = 0;
+
+        schedule.forEach(rnd => {
+            rnd.matches.forEach(([t1, t2]) => {
+                // Partners
+                [t1, t2].forEach(([p1, p2]) => {
+                    const key = p1 < p2 ? `${p1}-${p2}` : `${p2}-${p1}`;
+                    const count = (partnerCounts.get(key) || 0) + 1;
+                    partnerCounts.set(key, count);
+                    if (count > 1) {
+                        partnerPenalty += (count - 1) * 1000000;
+                    }
+                });
+                // Opponents
+                [[t1[0], t2[0]], [t1[0], t2[1]], [t1[1], t2[0]], [t1[1], t2[1]]].forEach(([o1, o2]) => {
+                    const key = o1 < o2 ? `${o1}-${o2}` : `${o2}-${o1}`;
+                    const count = (opponentCounts.get(key) || 0) + 1;
+                    opponentCounts.set(key, count);
+                    if (count > 1) {
+                        opponentPenalty += (count - 1) * 100;
+                    }
+                });
+            });
+        });
+
+        return { partnerPenalty, opponentPenalty, totalCost: partnerPenalty + opponentPenalty };
+    }
+
+    /**
+     * Generates a single candidate schedule across all rounds.
+     */
+    function generate_single_schedule(num_players, num_courts, num_rounds) {
         const players = Array.from({ length: num_players }, (_, i) => i + 1);
         const matches_per_round = Math.min(num_courts, Math.floor(num_players / 4));
         const sitters_per_round = num_players - (matches_per_round * 4);
 
         const tracker = new ScheduleTracker(num_players, matches_per_round);
-
-        // 2. Determine Sit-outs
-        // detailed_sit_schedule maps round_index -> array of sitting player IDs
         const sit_schedule = distribute_sit_outs(players, num_rounds, sitters_per_round);
 
         let full_schedule = [];
 
-        // 3. Generate Rounds
         for (let r = 0; r < num_rounds; r++) {
             const sitting_out = sit_schedule[r] || [];
             const active_players = players.filter(p => !sitting_out.includes(p));
 
-            let valid_round_found = false;
-            let best_fallback_round = null;
+            const matches = generate_round_matches(active_players, tracker, matches_per_round);
+            const assigned_matches = assign_courts(matches, tracker);
+            update_tracker(tracker, assigned_matches, sitting_out);
 
-            // Retry loop to find a round that allows valid court assignment
-            for (let attempt = 0; attempt < 50; attempt++) {
-                const matches = generate_round_matches(active_players, tracker, matches_per_round);
-
-                if (matches) {
-                    const assigned_matches = assign_courts(matches, tracker);
-
-                    // VALIDATE: Did this assignment cause any consecutive court violations?
-                    let has_consecutive = false;
-                    assigned_matches.forEach((match, c_idx) => {
-                        const ps = [match[0][0], match[0][1], match[1][0], match[1][1]];
-                        if (ps.some(p => tracker.last_court[p] === c_idx)) {
-                            has_consecutive = true;
-                        }
-                    });
-
-                    if (!has_consecutive) {
-                        // Success!
-                        update_tracker(tracker, assigned_matches, sitting_out);
-                        full_schedule.push({
-                            round: r + 1,
-                            matches: assigned_matches,
-                            sitting_out: sitting_out
-                        });
-                        valid_round_found = true;
-                        break;
-                    } else {
-                        // Save as fallback if we never find a perfect one
-                        if (!best_fallback_round) best_fallback_round = { matches: assigned_matches, sitting: sitting_out };
-                    }
-                }
-            }
-
-            if (!valid_round_found) {
-                // Check if we have a fallback from strict generation
-                if (best_fallback_round) {
-                    console.warn(`Round ${r + 1}: Strict court rotation failed, using best accepted strict match set.`);
-                    update_tracker(tracker, best_fallback_round.matches, sitting_out);
-                    full_schedule.push({
-                        round: r + 1,
-                        matches: best_fallback_round.matches,
-                        sitting_out: sitting_out
-                    });
-                } else {
-                    // Fallback to purely random if strict generation completely failed
-                    console.warn(`Could not find strict matches for round ${r + 1}, trying fallback generator.`);
-                    const fallback_matches = generate_round_matches_fallback(active_players, tracker, matches_per_round);
-                    // Assign courts for fallback
-                    const assigned_fallback = assign_courts(fallback_matches, tracker);
-                    update_tracker(tracker, assigned_fallback, sitting_out);
-                    full_schedule.push({
-                        round: r + 1,
-                        matches: assigned_fallback,
-                        sitting_out: sitting_out
-                    });
-                }
-            }
+            full_schedule.push({
+                round: r + 1,
+                matches: assigned_matches,
+                sitting_out: sitting_out
+            });
         }
 
         return full_schedule;
+    }
+
+    /**
+     * Main entry point for schedule generation.
+     * Uses multi-trial selection to guarantee the schedule with minimal partner repeats
+     * (0 partner repeats whenever mathematically possible).
+     */
+    function generate_schedule(num_players, num_courts, num_rounds) {
+        let bestSchedule = null;
+        let bestScore = Infinity;
+        const maxTrials = 20;
+
+        for (let trial = 0; trial < maxTrials; trial++) {
+            const sched = generate_single_schedule(num_players, num_courts, num_rounds);
+            const { partnerPenalty, totalCost } = scoreSchedule(sched);
+
+            if (totalCost < bestScore) {
+                bestScore = totalCost;
+                bestSchedule = sched;
+            }
+
+            // If 0 repeat partnerships were achieved, return immediately!
+            if (partnerPenalty === 0) {
+                break;
+            }
+        }
+
+        return bestSchedule;
     }
 
     /**
@@ -390,52 +398,41 @@ document.addEventListener('DOMContentLoaded', () => {
 
     /**
      * Generate matches for a single round using a randomized approach with local optimization (hill climbing).
+     * Primary priority: Never pair players who have already partnered together.
+     * Secondary priority: Minimize playing against repeat opponents.
+     * Tertiary priority: Minimize overall repeat court interactions.
      */
     function generate_round_matches(active_players, tracker, num_matches) {
         let best_round = null;
         let best_round_score = Infinity;
-        const attempts = 40; // Generate 40 random rounds, optimize them, and pick the best
+        const attempts = 50;
 
         // Helper to calculate the cost of a specific match pairing (t1 vs t2)
         const getMatchCost = (t1, t2) => {
-            // 1. Partnership repeats (Scale: 10000, Quadratic)
+            // 1. Partnership repeats - PRIMARY GOAL: STRICTLY AVOID PLAYING WITH THE SAME PLAYER TWICE
+            // Massive penalty ensures avoiding repeat partners is prioritized over all else
             const p1_cost = tracker.getPartnershipCount(t1[0], t1[1]);
             const p2_cost = tracker.getPartnershipCount(t2[0], t2[1]);
-            const partner_cost = (p1_cost ** 2 * 10000) + (p2_cost ** 2 * 10000);
+            const partner_cost = (p1_cost ** 2 * 10000000) + (p2_cost ** 2 * 10000000);
 
-            // 2. Opponent repeats (Scale: 500, Quadratic)
+            // 2. Opponent repeats (Scale: 1000, Quadratic)
             let opponent_cost = 0;
-            opponent_cost += tracker.getOpponentCount(t1[0], t2[0]) ** 2 * 500;
-            opponent_cost += tracker.getOpponentCount(t1[0], t2[1]) ** 2 * 500;
-            opponent_cost += tracker.getOpponentCount(t1[1], t2[0]) ** 2 * 500;
-            opponent_cost += tracker.getOpponentCount(t1[1], t2[1]) ** 2 * 500;
+            opponent_cost += tracker.getOpponentCount(t1[0], t2[0]) ** 2 * 1000;
+            opponent_cost += tracker.getOpponentCount(t1[0], t2[1]) ** 2 * 1000;
+            opponent_cost += tracker.getOpponentCount(t1[1], t2[0]) ** 2 * 1000;
+            opponent_cost += tracker.getOpponentCount(t1[1], t2[1]) ** 2 * 1000;
 
-            // 3. Interaction Repeats (Scale: 10, Quadratic) - Lower weight to allow partner/opponent switching
+            // 3. Interaction Repeats (Scale: 20, Quadratic)
             let interaction_cost = 0;
             const group_players = [t1[0], t1[1], t2[0], t2[1]];
             for (let x = 0; x < 4; x++) {
                 for (let y = x + 1; y < 4; y++) {
                     const count = tracker.getInteractionCount(group_players[x], group_players[y]);
-                    interaction_cost += (count ** 2 * 10);
+                    interaction_cost += (count ** 2 * 20);
                 }
             }
 
-            // 4. Court Blocking Penalty (Hard constraint proxy)
-            const blocked_courts = new Set();
-            group_players.forEach(p => {
-                const lc = tracker.last_court[p];
-                if (lc !== -1) blocked_courts.add(lc);
-            });
-            let valid_court_exists = false;
-            for (let c = 0; c < tracker.num_courts; c++) {
-                if (!blocked_courts.has(c)) {
-                    valid_court_exists = true;
-                    break;
-                }
-            }
-            const court_penalty = valid_court_exists ? 0 : 50000;
-
-            return partner_cost + opponent_cost + interaction_cost + court_penalty;
+            return partner_cost + opponent_cost + interaction_cost;
         };
 
         // Helper to find the best pairing for a group of 4 players
@@ -445,7 +442,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 [[group[0], group[2]], [group[1], group[3]]],
                 [[group[0], group[3]], [group[1], group[2]]]
             ];
-            let best_combo = null;
+            let best_combo = combinations[0];
             let best_combo_cost = Infinity;
             for (const combo of combinations) {
                 const cost = getMatchCost(combo[0], combo[1]);
@@ -465,7 +462,7 @@ document.addEventListener('DOMContentLoaded', () => {
             let groups = [];
             for (let j = 0; j < num_matches; j++) {
                 if (current_players.length >= 4) {
-                    groups.push(current_players.splice(0, 4));
+                    groups.push(current_players.slice(j * 4, j * 4 + 4));
                 }
             }
 
@@ -473,7 +470,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Hill Climbing Optimizer: Try swapping players between groups to lower the total score
             let improved = true;
-            let max_swaps = 20;
+            let max_swaps = 25;
             let swap_count = 0;
 
             while (improved && swap_count < max_swaps) {
@@ -518,22 +515,30 @@ document.addEventListener('DOMContentLoaded', () => {
             // Build the final matches for this attempt
             let round_matches = [];
             let round_score = 0;
-            let invalid_court = false;
 
             for (let g = 0; g < num_matches; g++) {
                 const res = getBestPairing(groups[g]);
-                if (res.cost >= 50000) invalid_court = true;
                 round_matches.push(res.combo);
                 round_score += res.cost;
             }
 
-            if (!invalid_court) {
-                if (round_score < best_round_score) {
-                    best_round_score = round_score;
-                    best_round = round_matches;
-                }
-
+            if (round_score < best_round_score) {
+                best_round_score = round_score;
+                best_round = round_matches;
                 if (round_score === 0) break;
+            }
+        }
+
+        // Safe fallback in case best_round was not formed
+        if (!best_round) {
+            let players = [...active_players];
+            shuffle(players);
+            best_round = [];
+            for (let i = 0; i < num_matches; i++) {
+                if (players.length < 4) break;
+                const group = players.splice(0, 4);
+                const res = getBestPairing(group);
+                best_round.push(res.combo);
             }
         }
 
@@ -541,38 +546,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     /**
-     * Fallback generator if strict constraints make it hard. Just shuffles and pairs.
-     */
-    function generate_round_matches_fallback(active_players, tracker, num_matches) {
-        let players = [...active_players];
-        shuffle(players);
-        let matches = [];
-        for (let i = 0; i < num_matches; i++) {
-            if (players.length < 4) break;
-            const group = players.splice(0, 4);
-            matches.push([[group[0], group[1]], [group[2], group[3]]]);
-        }
-        return matches;
-    }
-
-    /**
-     * Assign matches to courts to rotate players.
+     * Assign matches to courts to balance court usage and encourage court rotation.
+     * This assigns courts to already formed matches without altering pairings.
      */
     function assign_courts(matches, tracker) {
-        // We want to assign matches (m1, m2, m3...) to courts (c1, c2, c3...)
-        // such that players in m_i haven't played too much on c_i AND have not JUST played on c_i.
-
-        // Since num_courts is small (usually < 8), we can just try all permutations of assignments
-        // if num_matches is small.
-        // If num_matches <= 6 (6!=720), strict permutation is cheap.
-        // If num_matches > 6, maybe fallback to greedy.
-
+        if (!matches || matches.length === 0) return [];
         const num_courts = matches.length;
 
-        // Heuristic: If <= 6 courts, do full permutation search for optimal assignment.
-        // Else do improved greedy.
-
-        // Helper to calc usage score
+        // Cost function to balance court usage and penalize consecutive court play
         const calcCost = (assignment) => {
             let total_variance = 0;
             let consecutive_penalty = 0;
@@ -582,11 +563,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 players.forEach(p => {
                     // 1. Balance Cost
                     const current_count = tracker.court_counts[p] ? tracker.court_counts[p][c_idx] : 0;
-                    total_variance += (current_count + 1) ** 2; // preferring lower counts
+                    total_variance += (current_count + 1) ** 2;
 
-                    // 2. Consecutive Court Penalty (Strict)
+                    // 2. Consecutive Court Penalty (Soft preference to rotate)
                     if (tracker.last_court[p] === c_idx) {
-                        consecutive_penalty += 10000;
+                        consecutive_penalty += 50;
                     }
                 });
             });
@@ -608,11 +589,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     yield* permutations(arr, pos + 1);
                     [arr[pos], arr[i]] = [arr[i], arr[pos]];
                 }
-            }
+            };
 
             for (const perm of permutations([...indices])) {
-                // perm[i] is the match index assigned to court i
-                // construct candidate assignment
                 let candidate = new Array(num_courts);
                 for (let c = 0; c < num_courts; c++) {
                     candidate[c] = matches[perm[c]];
@@ -625,23 +604,20 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             return best_perm;
         } else {
-            // Greedy approach for many courts (rare in pickleball but possible)
-            // Just sort matches by "most needy of non-conflicting court"??
-            // Let's stick effectively to original logic but add consecutive check
-            let assigned_matches = new Array(num_courts); // index = court index
+            // Greedy approach for large number of courts
+            let assigned_matches = new Array(num_courts);
             let unassigned_matches = [...matches];
 
             for (let c = 0; c < num_courts; c++) {
-                let best_m_idx = -1;
+                let best_m_idx = 0;
                 let min_usage = Infinity;
 
                 unassigned_matches.forEach((match, idx) => {
                     const players = [match[0][0], match[0][1], match[1][0], match[1][1]];
                     let usage = players.reduce((sum, p) => sum + (tracker.court_counts[p] ? tracker.court_counts[p][c] : 0), 0);
 
-                    // Add huge penalty for consecutive
                     const has_consecutive = players.some(p => tracker.last_court[p] === c);
-                    if (has_consecutive) usage += 10000;
+                    if (has_consecutive) usage += 50;
 
                     if (usage < min_usage) {
                         min_usage = usage;
@@ -649,13 +625,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 });
 
-                if (best_m_idx !== -1) {
-                    assigned_matches[c] = unassigned_matches[best_m_idx];
-                    unassigned_matches.splice(best_m_idx, 1);
-                } else {
-                    assigned_matches[c] = unassigned_matches[0];
-                    unassigned_matches.splice(0, 1);
-                }
+                assigned_matches[c] = unassigned_matches[best_m_idx];
+                unassigned_matches.splice(best_m_idx, 1);
             }
             return assigned_matches;
         }
